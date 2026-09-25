@@ -1,9 +1,14 @@
 use crate::{
     assets::{AssetLoadingState, MyAssetPlugin, TileAssets},
-    noise::{Noise1d, Noises},
+    noise::Noises,
 };
-use bevy::{camera::ScalingMode, math::Vec3Swizzles, platform::collections::HashMap, prelude::*};
+use ::noise::{Fbm, MultiFractal, NoiseFn};
+use bevy::{
+    camera::ScalingMode, ecs::system::IntoResult, math::Vec3Swizzles,
+    platform::collections::HashMap, prelude::*,
+};
 use bevy_ecs_tilemap::{FrustumCulling, prelude::*};
+use rand::{RngExt, SeedableRng, TryRng, random, rngs::ChaCha8Rng};
 
 mod assets;
 mod noise;
@@ -19,19 +24,22 @@ const RENDER_CHUNK_SIZE: UVec2 = UVec2 {
     y: CHUNK_SIZE.y * 2,
 };
 
-const CHUNK_LOAD_SIZE: UVec2 = UVec2::splat(2);
+const CHUNK_LOAD_SIZE: UVec2 = UVec2::splat(4);
 
 // This is the speed for camera movement
-const CAMERA_MOVEMENT_SPEED: f32 = 100.;
+const CAMERA_MOVEMENT_SPEED: f32 = 300.;
 
 fn main() {
+    let mut rng: ChaCha8Rng = rand::make_rng();
+
     App::new()
         .add_plugins(DefaultPlugins.set(ImagePlugin::default_nearest()))
         .add_plugins(TilemapPlugin)
         .add_plugins(MyAssetPlugin)
         .insert_resource(ChunkManager::default())
         .insert_resource(Noises {
-            terrain: Noise1d::new(0),
+            terrain_grass: Fbm::new(rng.random()).set_octaves(3),
+            terrain_stone: Fbm::new(rng.random()).set_octaves(2),
         })
         .add_systems(Startup, startup)
         .add_systems(
@@ -70,7 +78,7 @@ fn spawn_chunk(
     mut commands: Commands,
     mut chunk_manager: ResMut<ChunkManager>,
     tile_assets: Res<TileAssets>,
-    mut noises: ResMut<Noises>,
+    noises: Res<Noises>,
 ) {
     let chunk_pos = spawn_chunk_event.0;
 
@@ -78,18 +86,41 @@ fn spawn_chunk(
     let mut tile_storage = TileStorage::empty(CHUNK_SIZE.into());
     // Spawn the elements of the tilemap.
     for x in 0..CHUNK_SIZE.x {
-        let terrain_height = (noises.terrain.get(x as f64 / 100.).max(0.) * 10.).round() as i32;
+        let absolute_tile_location_x = x as i32 + (chunk_pos.x - 1) * CHUNK_SIZE.x as i32;
+
+        let terrain_grass_height = (noises
+            .terrain_grass
+            .get([absolute_tile_location_x as f64 / 40., 0.])
+            * 10.)
+            .round() as i32;
+
+        let terrain_stone_height = (noises
+            .terrain_stone
+            .get([absolute_tile_location_x as f64 / 20., 0.])
+            * 30.)
+            .round() as i32
+            - 15;
 
         for y in 0..CHUNK_SIZE.y {
-            let absolute_tile_location_y =
-                y as i32 + (chunk_pos.y - 1) * TILE_SIZE.y.round() as i32;
-            if terrain_height >= absolute_tile_location_y {
+            let absolute_tile_location_y = y as i32 + (chunk_pos.y - 1) * CHUNK_SIZE.y as i32;
+
+            let mut current_tile = None;
+
+            if terrain_grass_height >= absolute_tile_location_y {
+                current_tile = Some(0);
+            }
+
+            if terrain_stone_height >= absolute_tile_location_y {
+                current_tile = Some(1);
+            }
+
+            if let Some(tile_id) = current_tile {
                 let tile_pos = TilePos { x, y };
                 let tile_entity = commands
                     .spawn(TileBundle {
                         position: tile_pos,
                         tilemap_id: TilemapId(tilemap_entity),
-                        texture_index: TileTextureIndex(0),
+                        texture_index: TileTextureIndex(tile_id),
                         ..Default::default()
                     })
                     .id();
@@ -143,7 +174,7 @@ fn startup(mut commands: Commands) {
         Camera2d,
         Projection::Orthographic(OrthographicProjection {
             scaling_mode: ScalingMode::FixedVertical {
-                viewport_height: 400.,
+                viewport_height: 800.,
             },
             scale: 1.,
             ..OrthographicProjection::default_2d()
